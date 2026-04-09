@@ -1,0 +1,61 @@
+# Grokenstein Policy Configuration
+# Per-workspace policy rules
+# This file is loaded by the Policy Engine at startup.
+
+# Global kill switch (overrides all workspace rules)
+kill_switch: false
+
+workspaces:
+  personal:
+    kill_switch: false
+    denied_tools: []
+    allowed_trust_levels: [HIGH, MEDIUM, LOW]
+    require_approval_tools: []
+    notes: "Personal workspace — full access for HIGH trust sessions"
+
+  consulting:
+    kill_switch: false
+    denied_tools:
+      - bitcoin_pay
+      - lightning_pay
+    allowed_trust_levels: [HIGH, MEDIUM]
+    notes: "Consulting workspace — no live finance execution"
+
+  experiments:
+    kill_switch: false
+    denied_tools:
+      - bitcoin_pay
+      - lightning_pay
+      - nostr_publish
+      - nostr_sign
+    allowed_trust_levels: [HIGH, MEDIUM]
+    notes: "Experiments workspace — no signing or payments"
+
+  infrastructure:
+    kill_switch: false
+    denied_tools: []
+    allowed_trust_levels: [HIGH]
+    notes: "Infrastructure workspace — HIGH trust required for all operations"
+
+# Tool-level risk classification
+tool_risk:
+  filesystem_read: low
+  filesystem_list: low
+  filesystem_write: medium
+  shell: medium
+  web_fetch: low
+  finance_balance: high
+  finance_transfer: critical
+  bitcoin_pay: critical
+  lightning_pay: critical
+  nostr_publish: high
+  nostr_sign: high
+  identity_update: critical
+
+# Rate limiting scaffold (requests per minute per session)
+rate_limits:
+  default: 60
+  shell: 20
+  web_fetch: 30
+  finance_balance: 10
+  bitcoin_pay: 3

@@ -1,0 +1,71 @@
+version: "3.9"
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    environment:
+      DATABASE_URL: "postgresql+asyncpg://grok:grokpass@postgres:5432/grokenstein"
+      DATABASE_URL_SYNC: "postgresql://grok:grokpass@postgres:5432/grokenstein"
+      WORKSPACE_ROOT: /workspace
+      AUDIT_LOG_FILE: /app/logs/audit.jsonl
+      KILL_SWITCH: "false"
+      POLICY_CONFIG_PATH: /app/scripts/policy_config.yaml
+    env_file:
+      - .env
+    volumes:
+      - workspace_data:/workspace
+      - audit_logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: grok
+      POSTGRES_PASSWORD: grokpass
+      POSTGRES_DB: grokenstein
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U grok -d grokenstein"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  bitcoind:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.bitcoind
+    ports:
+      - "8332:8332"
+    restart: unless-stopped
+    labels:
+      - "grokenstein.stub=true"
+      - "grokenstein.note=Bitcoin stub — no live node"
+
+  lnd:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.lnd
+    ports:
+      - "9735:9735"
+      - "10009:10009"
+      - "8090:8080"
+    restart: unless-stopped
+    labels:
+      - "grokenstein.stub=true"
+      - "grokenstein.note=LND stub — no live node"
+
+volumes:
+  pgdata:
+  workspace_data:
+  audit_logs:

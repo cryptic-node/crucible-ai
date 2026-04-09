@@ -1,0 +1,7 @@
+FROM alpine:3.18
+
+RUN apk add --no-cache socat
+
+EXPOSE 8080 9735 10009
+
+CMD ["sh", "-c", "echo 'lnd stub started'; socat TCP-LISTEN:8080,fork EXEC:'echo HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n{\"alias\":\"stub\",\"num_active_channels\":0}'"]

@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "grokenstein"
+version = "1.0.0"
+description = "Security-first, privacy-focused personal operator AI assistant."
+readme = "README.md"
+license = { text = "Unlicense" }
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.27.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.2.0",
+    "sqlalchemy>=2.0.0",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    "groq>=0.4.0",
+    "requests>=2.31.0",
+    "rich>=13.0.0",
+    "dataclasses-json>=0.6.0",
+    "pyyaml>=6.0",
+    "httpx>=0.27.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+grok = "app.cli.main:main"
+grok-legacy = "src.main:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov",
+    "pytest-asyncio>=0.23.0",
+    "httpx>=0.27.0",
+]
+pgvector = [
+    "pgvector>=0.2.4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["app/tests", "tests"]
+asyncio_mode = "auto"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src", "app"]

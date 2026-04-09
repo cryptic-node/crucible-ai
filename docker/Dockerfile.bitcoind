@@ -1,0 +1,7 @@
+FROM alpine:3.18
+
+RUN apk add --no-cache socat
+
+EXPOSE 8332 8333 18332 18333
+
+CMD ["sh", "-c", "echo 'bitcoind stub started'; socat TCP-LISTEN:8332,fork EXEC:'echo HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n{\"result\":null,\"error\":null,\"id\":null}'"]
