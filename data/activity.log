@@ -1,0 +1,14 @@
+2026-04-11T05:12:39.278814Z	tool=filesystem	method=list_dir	args=('.',)	kwargs={}
+2026-04-11T05:12:39.279262Z	tool=filesystem	method=write_file	args=('testfile.txt', 'Hello')	kwargs={}
+2026-04-11T05:12:39.279381Z	tool=filesystem	method=read_file	args=('testfile.txt',)	kwargs={}
+2026-04-11T05:12:39.285762Z	tool=shell	method=run	args=('ls',)	kwargs={}
+2026-04-11T05:12:39.291271Z	tool=shell	method=run	args=('pwd',)	kwargs={}
+2026-04-11T05:12:39.294849Z	tool=shell	method=run	args=('echo Hello from shell',)	kwargs={}
+2026-04-11T12:14:20.383017Z	tool=filesystem	method=list_dir	args=('.',)	kwargs={}
+2026-04-11T12:14:20.385223Z	tool=shell	method=run	args=('ls',)	kwargs={}
+2026-04-11T15:06:59.407616Z	tool=filesystem	method=list_dir	args=('.',)	kwargs={}
+2026-04-11T15:06:59.407907Z	tool=filesystem	method=write_file	args=('testfile2.txt', 'Hello world with spaces')	kwargs={}
+2026-04-11T15:06:59.408021Z	tool=filesystem	method=read_file	args=('testfile2.txt',)	kwargs={}
+2026-04-11T15:06:59.408166Z	tool=filesystem	method=write_file	args=('my file.txt', 'Hello from quoted path')	kwargs={}
+2026-04-11T15:06:59.408273Z	tool=filesystem	method=read_file	args=('my file.txt',)	kwargs={}
+2026-04-11T15:06:59.408482Z	tool=filesystem	method=write_file	args=('my_interactive.txt', 'This is line 1\nThis is line 2 with spaces')	kwargs={}
