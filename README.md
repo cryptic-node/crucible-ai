@@ -1,6 +1,4 @@
-# Grokenstein v1.0.3
-
-** Versioning changes... sorry. **
+# Grokenstein v0.0.3
 
 Grokenstein is an experimental personal AI assistant designed to run on your own
 hardware.  It provides a conversational interface, a simple persistent memory
