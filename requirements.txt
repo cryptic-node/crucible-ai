@@ -1,2 +1,3 @@
-# Only standard library modules are required.  Uncomment optional dependencies as needed.
-# prompt_toolkit>=3.0.0  # for a nicer interactive CLI
+# Grokenstein runtime uses only the Python standard library in v0.0.4.
+# Install tests separately with:
+#   pip install -r requirements-dev.txt
