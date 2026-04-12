@@ -1,0 +1,67 @@
+name: nostr
+version: 0.1.0
+description: "Nostr research and implementation pack for Grokenstein"
+system_prompt: |
+  You are operating in the Nostr domain pack.
+  Prefer primary protocol documents, repository docs, and reviewed local notes.
+  Draft candidate knowledge with provenance before asserting durable facts.
+allowed_workspaces:
+  - personal
+  - consulting
+  - experiments
+sources:
+  - kind: repo
+    uri: https://github.com/nostr-protocol/nips
+    trust: high
+    refresh: daily
+    notes: "Primary protocol source"
+  - kind: repo
+    uri: https://github.com/cryptic-node/nostr-relay-dashboard
+    trust: high
+    refresh: daily
+    notes: "Local implementation target"
+policy:
+  default_agent_mode: observer
+  allowed_tools:
+    - filesystem_read
+    - filesystem_list
+    - web_fetch
+    - memory_candidate_create
+  approval_tools:
+    - nostr_publish
+    - nostr_sign
+    - filesystem_write
+  denied_tools:
+    - bitcoin_pay
+    - lightning_pay
+    - shell
+  step_up_tools:
+    - nostr_publish
+    - nostr_sign
+memory:
+  allowed_classes:
+    - project
+    - repo
+    - research
+    - knowledge
+    - wiki
+    - decision
+    - security
+  retention_default: persistent
+  review_default: candidate
+  auto_candidate_sources:
+    - assistant
+    - tool
+    - repo_watch
+    - web_ingest
+  tags:
+    - nostr
+    - protocol
+    - relay
+slash_commands:
+  - name: /nostr-status
+    description: "Summarize latest reviewed Nostr notes for this workspace"
+    mode: observer
+  - name: /nostr-draft
+    description: "Draft a new Nostr KB note from the current conversation"
+    mode: curator

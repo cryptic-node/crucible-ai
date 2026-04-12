@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "GrokensteinDomainPack",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "name",
+    "version",
+    "description",
+    "system_prompt",
+    "sources",
+    "policy",
+    "memory"
+  ],
+  "properties": {
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z0-9_-]+$"
+    },
+    "version": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "extends": {
+      "type": "string"
+    },
+    "allowed_workspaces": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "system_prompt": {
+      "type": "string"
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "kind",
+          "uri",
+          "trust"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "repo",
+              "web",
+              "local",
+              "nostr",
+              "manual"
+            ]
+          },
+          "uri": {
+            "type": "string"
+          },
+          "trust": {
+            "type": "string",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ]
+          },
+          "refresh": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default_agent_mode",
+        "allowed_tools",
+        "approval_tools",
+        "denied_tools"
+      ],
+      "properties": {
+        "default_agent_mode": {
+          "type": "string",
+          "enum": [
+            "interactive",
+            "observer",
+            "curator",
+            "operator"
+          ]
+        },
+        "allowed_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "approval_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "denied_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "step_up_tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_classes",
+        "retention_default",
+        "review_default"
+      ],
+      "properties": {
+        "allowed_classes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "retention_default": {
+          "type": "string"
+        },
+        "review_default": {
+          "type": "string"
+        },
+        "auto_candidate_sources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "slash_commands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "description"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "mode": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

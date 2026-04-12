@@ -1,0 +1,70 @@
+# Example extension for scripts/policy_config.yaml
+# This overlay does not replace the current workspace policy file.
+# It adds agent modes so future 24/7 jobs can run in a narrow safety lane.
+
+agent_modes:
+  interactive:
+    notes: "Normal human-led session"
+    allow_write: true
+    allow_shell: true
+    auto_memory: candidate
+    require_step_up_for:
+      - nostr_sign
+      - nostr_publish
+      - bitcoin_pay
+      - lightning_pay
+      - identity_update
+
+  observer:
+    notes: "Read-only watcher for repos, docs, and sources"
+    allow_write: false
+    allow_shell: false
+    allow_publish: false
+    allow_payments: false
+    memory_target: candidate
+    max_tool_calls_per_run: 25
+    allowed_tools:
+      - filesystem_read
+      - filesystem_list
+      - web_fetch
+
+  curator:
+    notes: "Can draft candidate knowledge but cannot change external systems"
+    allow_shell: false
+    allow_publish: false
+    allow_payments: false
+    memory_target: candidate
+    max_tool_calls_per_run: 20
+    allowed_tools:
+      - filesystem_read
+      - filesystem_list
+      - web_fetch
+      - memory_candidate_create
+      - wiki_draft_write
+      - kb_extract_write
+      - repo_note_write
+    approval_required_for:
+      - wiki_publish
+      - repo_commit
+      - filesystem_write
+
+  operator:
+    notes: "Prepares actions, but sensitive actions still require approval"
+    allow_shell: true
+    allow_write: true
+    max_tool_calls_per_run: 15
+    approval_required_for:
+      - filesystem_write
+      - shell
+      - nostr_publish
+      - nostr_sign
+      - bitcoin_pay
+      - lightning_pay
+      - repo_commit
+      - repo_push
+    require_step_up_for:
+      - nostr_publish
+      - nostr_sign
+      - bitcoin_pay
+      - lightning_pay
+      - identity_update
