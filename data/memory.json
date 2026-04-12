@@ -1,0 +1,30 @@
+{
+  "default": [
+    {
+      "role": "user",
+      "content": "Hello"
+    },
+    {
+      "role": "assistant",
+      "content": "You said: Hello (NOTE: language model not yet integrated)"
+    }
+  ],
+  "test": [
+    {
+      "role": "user",
+      "content": "Hello"
+    },
+    {
+      "role": "assistant",
+      "content": "You said: Hello (NOTE: language model not yet integrated)"
+    },
+    {
+      "role": "user",
+      "content": "a"
+    },
+    {
+      "role": "assistant",
+      "content": "You said: a (NOTE: language model not yet integrated)"
+    }
+  ]
+}

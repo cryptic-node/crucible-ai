@@ -1,252 +1,142 @@
-# Grokenstein v1.0.0
+# Grokenstein v1.0.3
 
-**Security-first, privacy-focused personal operator AI assistant**
+** Versioning changes... sorry. **
 
-Grokenstein is a local-first AI agent that helps you manage files, information, and communications — with strict policy controls, auditable tool execution, and persistent memory. It is designed to be your personal AI operator, not a cloud service.
+Grokenstein is an experimental personal AI assistant designed to run on your own
+hardware.  It provides a conversational interface, a simple persistent memory
+store, and a mechanism for safely executing a small number of tools such as
+reading or writing files and running whitelisted shell commands.  This
+repository contains a minimal implementation intended to serve as a starting
+point for further development.
 
----
+## Goals and non‑goals
 
-## Quick Start
+The initial release targets a **private, local‑only assistant**.  It is not
+connected to any remote API by default and does not attempt to perform
+autonomous actions on your behalf.  Instead it focuses on a robust
+architecture that makes it easy to add features later without sacrificing
+security or auditability.  In particular we aim to:
 
-```bash
-# 1. Copy and configure environment variables
-cp .env.example .env
-# Edit .env — add at least one LLM backend API key
+* **Protect your data.**  All conversation history and memory are stored on
+  disk under the `data/` directory.  External network calls are disabled in
+  this version.
+* **Enforce least privilege.**  A policy engine and a tool broker mediate
+  every tool call, inspired by agent security frameworks【202387827095724†L13-L40】.
+* **Make memory persistent.**  Messages are saved to a simple JSON file so
+  they can be recalled across restarts.  This design echoes research into
+  long‑term memory for assistants【972723700336349†L44-L101】.
+* **Offer a clean separation of concerns.**  The chat loop lives in
+  `runtime.py`, the policy engine in `policy.py`, tools in the `tools/`
+  package, and memory management in `memory.py`.
 
-# 2. Install dependencies
-pip install -r requirements.txt
+We intentionally **do not** include any networked model inference, Nostr
+integration or Lightning key management in this release.  Those features will
+be added incrementally once the baseline is stable.
 
-# 3. Interactive chat (CLI)
-python -m app.cli.main chat --workspace personal --trust HIGH
-
-# 4. Single task
-python -m app.cli.main run "List files in /workspace" --workspace personal
-
-# 5. Start web server
-python -m app.cli.main serve
-# Then open http://localhost:8080/ui in your browser
-
-# 6. Docker (includes Postgres + pgvector)
-docker-compose up
-```
-
----
-
-## Architecture Overview
-
-```
-You (CLI / Web UI)
-      │
-      ▼
-┌─────────────┐
-│   Brain     │  Chat loop, planning, memory retrieval
-│  (brain/)   │  Routes ALL tool calls via ToolBroker
-└──────┬──────┘
-       │ only via Broker
-       ▼
-┌─────────────┐    ┌──────────────┐    ┌──────────────┐
-│ Tool Broker │───▶│ Policy Engine│    │ Audit Logger │
-│ (broker/)   │    │ (policy/)    │◀──▶│ (core/audit) │
-└──────┬──────┘    └──────────────┘    └──────────────┘
-       │
-       ▼
-┌──────────────────────────────────────────────┐
-│  Tools: filesystem | shell | web_fetch       │
-│  Finance stubs | Nostr stubs                 │
-└──────────────────────────────────────────────┘
-       │
-       ▼
-┌─────────────┐    ┌──────────────┐
-│   Memory    │    │   Database   │
-│  Service    │    │  Postgres +  │
-│ (memory/)   │    │  pgvector    │
-└─────────────┘    └──────────────┘
-```
-
----
-
-## Workspace Model
-
-| Workspace       | Default Trust | Notes                                      |
-|-----------------|---------------|--------------------------------------------|
-| `personal`      | HIGH          | Full access for local sessions             |
-| `consulting`    | MEDIUM        | No live finance execution                  |
-| `experiments`   | MEDIUM        | No signing or payments                     |
-| `infrastructure`| HIGH          | HIGH trust required for all operations     |
-
-Each workspace has separate memory scope, policy config, and audit partitioning.
-
----
-
-## Security Principles
-
-1. **Tool Broker is the sole gateway** — Brain never calls tool handlers directly
-2. **Policy Engine decides before every tool call** — allow, deny, require_approval, require_simulation, escalate_channel
-3. **Workspace isolation** — memory, audit, and policy are partitioned by workspace
-4. **Trust levels enforced** — HIGH/MEDIUM/LOW gating on all sensitive operations
-5. **Finance requires HIGH trust + simulation first** — no live payment without dry_run → approve → execute
-6. **Filesystem locked to /workspace** — path traversal attempts are rejected
-7. **Shell uses allowlist** — only known-safe commands are permitted
-8. **Secrets never stored in memory tables** — is_secret flag enforced
-9. **Structured audit log** — every sensitive action emits a JSON record
-10. **Emergency kill switch** — one env var to deny all tool execution
-
----
-
-## What Is Implemented
-
-- FastAPI backend with session, chat, workspace, memory, and health endpoints
-- Policy Engine with all five decision types
-- Tool Broker with Pydantic validation, policy gating, audit logging, dry_run
-- Filesystem tool (workspace-sandboxed)
-- Shell tool (command allowlist)
-- Web fetch tool (size + timeout limits)
-- Memory Service with semantic search (stub embeddings) and user review/delete
-- Structured audit logger (JSON, file-backed)
-- Trust level model (HIGH/MEDIUM/LOW)
-- Workspace separation (personal, consulting, experiments, infrastructure)
-- Finance stubs (Bitcoin, Lightning) with Pydantic schemas
-- Nostr stubs (identity, relay allowlist, NIP-46 signing boundary)
-- Minimal web chat UI
-- CLI entrypoint
-- Docker Compose (app, postgres+pgvector, bitcoind stub, lnd stub)
-- pytest test suite
-
----
-
-## What Is Stubbed / Not Yet Implemented
-
-- **Live Nostr signing** — NIP-46 remote signer not wired; schemas only
-- **Live Bitcoin/Lightning** — RPC/REST clients not connected; schemas only
-- **Real pgvector embeddings** — uses deterministic hash-based stub; wire in real model via `EMBEDDING_MODEL`
-- **Alembic migrations** — engine and Base defined; run `alembic init` and configure
-- **Mobile/PWA session** — out of scope for v1.0.0
-- **Rate limiting enforcement** — scaffold defined in policy config; not enforced in broker yet
-
----
-
-## Secrets Warning
-
-**Never** store private keys, nsecs, wallet seeds, or API secrets in:
-- Memory records (the service rejects `is_secret=True` records)
-- Session messages
-- Chat history
-- Audit logs (inputs are hashed, not stored raw)
-
-Use a proper secrets manager (environment variables, Vault, hardware key) for all sensitive credentials.
-
----
-
-## Roadmap
-
-- [ ] Real pgvector embeddings (sentence-transformers or OpenAI)
-- [ ] NIP-46 remote signing integration
-- [ ] Live Bitcoin RPC client
-- [ ] Live LND gRPC/REST client
-- [ ] Alembic migration setup
-- [ ] Rate limiting enforcement in Tool Broker
-- [ ] Web UI memory review page
-- [ ] Step-up approval flow (TOTP or hardware key)
-- [ ] Multi-user session support
-
----
-
-## Features
-
-- **Multi-model routing** — automatically picks the best available backend based on environment variables
-- **Persistent sessions** — conversations are saved to disk and resumable
-- **Tool execution** — bash, file read/write, and web fetch tools built in
-- **Slash commands** — `/help`, `/models`, `/save`, `/clear`, `/exit`
-- **Pure Python** — no heavy frameworks, no containers
-
----
-
-## Supported Backends
-
-| Backend      | Environment Variable   | Notes                          |
-|--------------|------------------------|--------------------------------|
-| Groq         | `GROQ_API_KEY`         | Llama3, Mixtral via groq SDK   |
-| Ollama       | *(none required)*      | Local inference, default local |
-| OpenRouter   | `OPENROUTER_API_KEY`   | Access to 100+ models          |
-| HuggingFace  | `HF_API_KEY`           | Inference API                  |
-
-Backend priority: Groq → Ollama → OpenRouter → HuggingFace.  
-Override with `GROK_BACKEND=ollama` (or any backend name).
-
----
-
-## Quick Start
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Set at least one API key (or use Ollama locally)
-export GROQ_API_KEY=your_key_here
-
-# Start a chat session
-python -m grokenstein.src.main chat
-
-# Run a one-shot task
-python -m grokenstein.src.main run "Summarize the Fermi paradox in 3 sentences"
-
-# List available backends
-python -m grokenstein.src.main models
-
-# Show all tools
-python -m grokenstein.src.main tools
-
-# Resume a saved session
-python -m grokenstein.src.main chat --session <session-id>
-```
-
----
-
-## Project Structure
+## Directory structure
 
 ```
-grokenstein/
-├── src/
+grokenstein_v0.0.3/
+├── README.md          – this file
+├── requirements.txt   – Python dependencies
+├── grokenstein/
 │   ├── __init__.py
-│   ├── main.py            # CLI entrypoint (argparse)
-│   ├── models.py          # Core dataclasses
-│   ├── models_router.py   # Multi-model backend router
-│   ├── context.py         # Workspace context (GrokContext)
-│   ├── runtime.py         # GrokRuntime — top-level orchestrator
-│   ├── query_engine.py    # GrokQueryEngine — turn loop + session
-│   ├── permissions.py     # ToolPermissionContext
-│   ├── history.py         # In-memory conversation log
-│   ├── transcript.py      # Flushable transcript store
-│   ├── session_store.py   # Disk-backed session persistence
-│   ├── tools.py           # Tool registry (bash, file, web)
-│   └── commands.py        # Slash command registry
-├── tests/
-│   └── __init__.py
-├── assets/
-├── .sessions/             # Auto-created by session_store
-├── README.md
-├── LICENSE
-├── requirements.txt
-├── pyproject.toml
-└── .gitignore
+│   ├── main.py        – entry point for the CLI interface
+│   ├── runtime.py     – top‑level chat loop and orchestrator
+│   ├── memory.py      – simple JSON backed memory manager
+│   ├── tool_broker.py – mediator for tool calls
+│   ├── policy.py      – policy engine defining what is allowed
+│   ├── logger.py      – simple audit logger
+│   └── tools/
+│       ├── __init__.py
+│       ├── filesystem.py – safe file read/write operations
+│       └── shell.py      – whitelisted shell command runner
+└── data/
+    └── memory.json    – persisted conversation history (created at runtime)
 ```
 
----
+The `workspaces/` directory is not used in this version but is reserved for
+future support of multiple trust domains as described in Grokenstein’s
+architecture【202387827095724†L13-L40】.  Logging is written to
+`data/activity.log`.
 
-## Architecture
+## Installation
 
-Grokenstein mirrors the agent harness pattern from a Python port of Claude Code, with all subsystem names adapted for the Grokenstein identity:
+This project requires Python 3.8 or later.  No external dependencies are
+strictly necessary, although optional libraries such as `prompt_toolkit` can
+improve the command‑line experience.  To install the baseline environment run:
 
-| claude-code concept | Grokenstein equivalent    |
-|---------------------|---------------------------|
-| `PortRuntime`       | `GrokRuntime`             |
-| `PortingModule`     | `ModelAdapter`            |
-| `PortContext`       | `GrokContext`             |
-| `QueryEnginePort`   | `GrokQueryEngine`         |
-| `PortingBacklog`    | `ModelBacklog`            |
+```sh
+cd grokenstein_v0.0.2
+python -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+```
 
----
+## Running Grokenstein
 
-## License
+Start the assistant via the command line:
 
-This is free and unencumbered software released into the public domain. See [LICENSE](LICENSE).
+```sh
+python -m grokenstein.main --id mysession --workspace /path/to/workspace
+```
+
+You will see a prompt (`>>`) asking you to enter messages.  In this version
+the assistant responds by echoing your input and maintaining a running
+history, and it also supports a handful of built‑in commands:
+
+* `!help` – display a short summary of available commands.
+* `!history` – show the conversation history for the current session.
+* `!fs list [path]` – list the contents of a directory relative to the
+  workspace (defaults to `.`).
+* `!fs read <path>` – read a file relative to the workspace.
+* `!fs write <path> <content>` – write content to a file relative to the
+  workspace.
+* `!shell <command>` – run a whitelisted shell command (see `PolicyEngine` for the allowlist).
+
+You can terminate the session by typing `exit` or pressing `Ctrl‑D`.
+
+## New in v0.0.2
+
+This release adds several quality‑of‑life improvements over the previous
+prototype:
+
+* **Built‑in help and history.**  You can type `!help` for a list of
+  available commands and `!history` to print your conversation so far.
+* **Interactive file writes.**  The `!fs write` command now supports
+  quoted paths and will prompt you for multiline content if you omit
+  a content argument.
+* **Workspace configuration.**  A new `--workspace` command line flag lets
+  you choose where file operations occur.
+* **Improved command parsing.**  `shlex` is used for robust parsing of
+  quoted paths and content, and error messages have been refined.
+* **Version bump.**  The internal version constant has been updated to
+  `0.0.3` and directory references have been updated accordingly.
+
+These enhancements make it easier to explore the assistant and begin
+customising its behaviour without needing to inspect the source code directly.
+terminate the session by typing `exit` or pressing `Ctrl‑D`.
+
+## Extending the assistant
+
+The core architecture is designed to be extensible.  To add a new tool, place
+a new module inside `grokenstein/tools/` and register it in
+`tool_broker.py`.  Tools should validate their inputs and consult the
+`PolicyEngine` before performing any side effects.  Consult the in‑code
+documentation for more details.
+
+Future versions may incorporate local language models (via [Ollama],
+[Groq] or similar), richer retrieval augmented generation, Nostr and
+Lightning integration, and multiple workspaces.  For the moment, this
+repository should be seen as a stepping stone towards those goals.
+
+## References
+
+This project draws inspiration from several sources.  The Grokenstein
+architecture and threat model emphasise a layered approach where a brain
+component sends requests through a policy‑checking broker【202387827095724†L13-L40】.
+Research on open‑source memory layers like Mem0 shows why persistent memory
+is important for local assistants【972723700336349†L44-L101】.  IBM’s security
+guidelines recommend least‑privilege controls, sandboxing and continuous
+logging for AI agents【315594017234579†L69-L82】.  All of these ideas have
+influenced the design of this minimal implementation.

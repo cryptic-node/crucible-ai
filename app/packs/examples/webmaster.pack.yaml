@@ -1,0 +1,67 @@
+name: webmaster
+version: 0.1.0
+description: "Webmaster pack for secure site monitoring and draft updates"
+system_prompt: |
+  You are operating in the Webmaster domain pack.
+  You may monitor websites, changelogs, uptime notes, and repo docs.
+  Never publish or deploy without explicit approval.
+allowed_workspaces:
+  - infrastructure
+  - consulting
+sources:
+  - kind: web
+    uri: https://example.com
+    trust: medium
+    refresh: daily
+    notes: "Replace with production HTTPS site"
+  - kind: manual
+    uri: internal://deployment-runbook
+    trust: high
+    refresh: weekly
+    notes: "Deployment and incident playbook"
+policy:
+  default_agent_mode: observer
+  allowed_tools:
+    - filesystem_read
+    - filesystem_list
+    - web_fetch
+    - memory_candidate_create
+    - wiki_draft_write
+  approval_tools:
+    - filesystem_write
+    - shell
+    - repo_commit
+    - repo_push
+    - site_deploy
+  denied_tools:
+    - bitcoin_pay
+    - lightning_pay
+    - nostr_sign
+  step_up_tools:
+    - site_deploy
+memory:
+  allowed_classes:
+    - project
+    - repo
+    - research
+    - knowledge
+    - wiki
+    - security
+    - decision
+  retention_default: persistent
+  review_default: candidate
+  auto_candidate_sources:
+    - assistant
+    - tool
+    - web_ingest
+  tags:
+    - webmaster
+    - operations
+    - site
+slash_commands:
+  - name: /site-status
+    description: "Summarize recent monitored website changes and incidents"
+    mode: observer
+  - name: /draft-site-update
+    description: "Prepare a draft content or deployment note for review"
+    mode: curator
