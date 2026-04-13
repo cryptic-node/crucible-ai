@@ -1,57 +1,122 @@
-"""Basic policy engine for Grokenstein.
-
-The policy engine evaluates whether a proposed tool invocation is permitted.
-It implements a simple least‑privilege model: only whitelisted commands may
-be run via the shell tool, and file operations are constrained by the
-filesystem tool itself.  As the assistant grows, this component can be
-extended to load per‑workspace policies from disk or to incorporate
-user‑specified allowlists and denylists.
-"""
-
 from __future__ import annotations
 
+import shlex
+from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Sequence
 
 
+class Decision(str, Enum):
+    ALLOW = "allow"
+    DENY = "deny"
+    REQUIRE_APPROVAL = "require_approval"
+
+
+@dataclass(slots=True)
+class PolicyDecision:
+    decision: Decision
+    reason: str
+    action_type: str
+    risk_level: str
+
+
 class PolicyEngine:
-    """Evaluate whether a tool call is allowed."""
+    def __init__(
+        self,
+        shell_allowlist: Sequence[str],
+        kill_switch: bool = False,
+        require_approval_for_write: bool = True,
+        require_approval_for_shell: bool = True,
+    ) -> None:
+        self.shell_allowlist = set(shell_allowlist)
+        self.kill_switch = kill_switch
+        self.require_approval_for_write = require_approval_for_write
+        self.require_approval_for_shell = require_approval_for_shell
 
-    # Simple allowlist of commands permitted in the shell tool
-    _allowed_shell_commands = {"ls", "echo", "pwd", "whoami", "date"}
+    def evaluate(
+        self,
+        tool_name: str,
+        method_name: str,
+        args: Sequence[Any],
+        kwargs: dict[str, Any],
+    ) -> PolicyDecision:
+        if self.kill_switch:
+            return PolicyDecision(
+                decision=Decision.DENY,
+                reason="Global kill switch is enabled.",
+                action_type="blocked",
+                risk_level="critical",
+            )
 
-    def is_allowed(self, tool_name: str, method_name: str, args: Sequence[Any], kwargs: dict) -> bool:
-        """Return True if the requested tool call should proceed.
+        if tool_name == "filesystem":
+            if method_name == "list_dir":
+                return PolicyDecision(Decision.ALLOW, "Workspace listing allowed.", "list", "low")
+            if method_name == "read_file":
+                return PolicyDecision(Decision.ALLOW, "Workspace read allowed.", "read", "low")
+            if method_name == "write_file":
+                if self.require_approval_for_write:
+                    return PolicyDecision(
+                        Decision.REQUIRE_APPROVAL,
+                        "Workspace writes require approval.",
+                        "write",
+                        "medium",
+                    )
+                return PolicyDecision(Decision.ALLOW, "Workspace write allowed.", "write", "medium")
 
-        Args:
-            tool_name: logical name of the tool (e.g., ``"shell"``)
-            method_name: the method on the tool being invoked (e.g., ``"run"``)
-            args: positional arguments passed to the method
-            kwargs: keyword arguments passed to the method
-
-        Returns:
-            Boolean indicating if the call is permitted.
-        """
         if tool_name == "shell" and method_name == "run":
-            # Expect a single string argument containing the command
             if not args:
-                return False
+                return PolicyDecision(Decision.DENY, "Missing shell command.", "execute", "high")
             raw_command = str(args[0])
-            # Use shlex to parse the command respecting quotes
-            import shlex
-            try:
-                tokens = shlex.split(raw_command)
-            except ValueError:
-                return False
-            if not tokens:
-                return False
-            cmd_name = tokens[0]
-            # Permit only commands in the allowlist
-            if cmd_name not in self._allowed_shell_commands:
-                return False
-            # Disallow chaining of commands via common shell operators
-            for tok in tokens[1:]:
-                if tok in {";", "&&", "||", "|"}:
-                    return False
-            return True
-        # By default allow other tools; specific checks can be added here
-        return True
+            parsed = self._parse_shell_command(raw_command)
+            if parsed is None:
+                return PolicyDecision(Decision.DENY, "Invalid shell command syntax.", "execute", "high")
+            if not parsed:
+                return PolicyDecision(Decision.DENY, "Empty shell command.", "execute", "high")
+
+            command_name = parsed[0]
+            if command_name not in self.shell_allowlist:
+                return PolicyDecision(
+                    Decision.DENY,
+                    f"Command '{command_name}' is not in the shell allowlist.",
+                    "execute",
+                    "high",
+                )
+
+            for token in parsed[1:]:
+                if token in {";", "&&", "||", "|", "`", "$()"}:
+                    return PolicyDecision(
+                        Decision.DENY,
+                        "Shell chaining operators are not permitted.",
+                        "execute",
+                        "high",
+                    )
+                if token.startswith("/") or ".." in token:
+                    return PolicyDecision(
+                        Decision.DENY,
+                        "Shell path arguments must stay inside the workspace.",
+                        "execute",
+                        "high",
+                    )
+
+            if self.require_approval_for_shell:
+                return PolicyDecision(
+                    Decision.REQUIRE_APPROVAL,
+                    "Shell commands require approval.",
+                    "execute",
+                    "high",
+                )
+            return PolicyDecision(Decision.ALLOW, "Shell command allowed.", "execute", "high")
+
+        return PolicyDecision(
+            decision=Decision.DENY,
+            reason=f"Tool call {tool_name}.{method_name} is not allowed in this release.",
+            action_type="blocked",
+            risk_level="high",
+        )
+
+    @staticmethod
+    def _parse_shell_command(command: str) -> list[str] | None:
+        try:
+            return shlex.split(command)
+        except ValueError:
+            return None

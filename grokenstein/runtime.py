@@ -1,156 +1,152 @@
-"""Chat runtime orchestrator for Grokenstein.
-
-This module ties together the memory manager, policy engine and tool broker
-to provide a simple chat loop.  For now the response generation is a
-placeholder that simply echoes the user's input.  In future iterations
-this component can be extended to call a local language model or
-external service to produce intelligent replies, and to leverage
-retrieval‑augmented memory.
-"""
-
 from __future__ import annotations
 
-import os
-import datetime
 import shlex
-from typing import List, Tuple
+from pathlib import Path
+from typing import List
 
-from .memory import MemoryManager
-from .policy import PolicyEngine
-from .tool_broker import ToolBroker
+from .approvals import PendingApprovalStore
+from .config import RuntimeConfig
 from .logger import AuditLogger
+from .memory import MemoryManager
+from .model import ModelResponse, create_model_adapter
+from .policy import PolicyEngine
+from .tool_broker import ToolBroker, ToolCallResult
 
 
 class ChatRuntime:
-    """High‑level orchestrator for user messages and assistant replies."""
-
     def __init__(
         self,
         conversation_id: str = "default",
         workspace_root: str | None = None,
+        base_dir: str | Path | None = None,
+        model_backend: str | None = None,
+        model_name: str | None = None,
     ) -> None:
-        """Create a new runtime.
-
-        Args:
-            conversation_id: identifier for this chat session.  Each ID
-                corresponds to a separate conversation history.
-            workspace_root: optional path to the workspace directory used
-                for file operations.  If not provided, a ``workspace``
-                directory alongside the package will be used.
-        """
-        # Determine paths for persistent state
-        base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
-        data_dir = os.path.join(base_dir, "data")
-        # Ensure data directory exists
-        os.makedirs(data_dir, exist_ok=True)
-        memory_path = os.path.join(data_dir, "memory.json")
-        log_path = os.path.join(data_dir, "activity.log")
-
-        # Instantiate core components
-        self.conversation_id: str = conversation_id
-        self.memory = MemoryManager(memory_path)
-        self.policy = PolicyEngine()
-        self.logger = AuditLogger(log_path)
-        # Pass the workspace root to the tool broker (if None, broker will choose a default)
-        self.broker = ToolBroker(policy=self.policy, logger=self.logger, workspace_root=workspace_root)
+        self.conversation_id = conversation_id
+        self.config = RuntimeConfig.from_env(
+            workspace_root=workspace_root,
+            base_dir=base_dir,
+            model_backend=model_backend,
+            model_name=model_name,
+        )
+        self.memory = MemoryManager(str(self.config.memory_path))
+        self.logger = AuditLogger(str(self.config.audit_log_path))
+        self.approvals = PendingApprovalStore(str(self.config.approval_store_path))
+        self.policy = PolicyEngine(
+            shell_allowlist=self.config.shell_allowlist,
+            kill_switch=self.config.kill_switch,
+            require_approval_for_write=self.config.require_approval_for_write,
+            require_approval_for_shell=self.config.require_approval_for_shell,
+        )
+        self.broker = ToolBroker(
+            policy=self.policy,
+            logger=self.logger,
+            approvals=self.approvals,
+            workspace_root=self.config.workspace_root,
+        )
+        self.model = create_model_adapter(self.config)
+        self.logger.log_event(
+            "session_started",
+            session_id=self.conversation_id,
+            model_backend=self.model.backend_name,
+            workspace_root=str(self.config.workspace_root),
+        )
 
     def handle_user_message(self, user_message: str) -> str:
-        """Process a message from the user and return the assistant's reply.
-
-        The method distinguishes between two kinds of input:
-
-        1. **Tool invocations**, which are prefixed with an exclamation
-           point (``!``).  Supported commands are ``!fs`` for filesystem
-           operations and ``!shell`` for shell commands.  See below for
-           usage.
-        2. **Chat messages**, which are stored in memory and answered by
-           the assistant via a placeholder echo function.
-
-        Supported tool commands:
-
-        * ``!fs list [path]`` – list the contents of a directory relative
-          to the workspace (defaults to ``.`` if omitted).
-        * ``!fs read <path>`` – read a file relative to the workspace.
-        * ``!fs write <path> <content>`` – write the provided content to
-          the file at ``path``.  Intermediate directories will be created.
-        * ``!shell <command>`` – run a whitelisted shell command.  The
-          allowlist is defined in ``PolicyEngine``.
-
-        Args:
-            user_message: the raw text from the user
-
-        Returns:
-            The assistant's response as a string.
-        """
         stripped = user_message.strip()
-        # Built‑in meta commands
+        if not stripped:
+            return ""
+
         if stripped.lower() in {"!help", "help"}:
             return self._help_message()
         if stripped.lower() in {"!history", "history"}:
             return self._history_message()
-        # Determine if this is a tool invocation
+        if stripped.lower() in {"!status", "status"}:
+            return self._status_message()
+        if stripped.lower() in {"!pending", "pending"}:
+            return self._pending_message()
+        if stripped.startswith("!approve"):
+            return self._approve_command(stripped)
+        if stripped.startswith("!deny"):
+            return self._deny_command(stripped)
+
         if stripped.startswith("!"):
             try:
                 return self._handle_tool_invocation(stripped)
-            except Exception as exc:
+            except Exception as exc:  # pragma: no cover - CLI safety net
+                self.logger.log_event(
+                    "tool_error",
+                    session_id=self.conversation_id,
+                    error=repr(exc),
+                )
                 return f"Error: {exc}"
-        # Otherwise treat as a chat message
-        # Record the user message in memory
+
+        self.logger.log_event(
+            "user_message",
+            session_id=self.conversation_id,
+            content=user_message,
+        )
         self.memory.append_message(self.conversation_id, "user", user_message)
-        # Generate the assistant reply using a placeholder function
-        assistant_reply = self._generate_reply(user_message)
-        # Record the assistant's reply
+        history = self.memory.load_history(self.conversation_id)
+        model_response = self.model.generate(user_message, history)
+
+        if model_response.mode == "tool_call":
+            broker_result = self.broker.request_tool_call(
+                self.conversation_id,
+                model_response.tool_name or "",
+                model_response.method_name or "",
+                *model_response.args,
+                **model_response.kwargs,
+            )
+            assistant_reply = self._format_tool_result(model_response, broker_result)
+        else:
+            assistant_reply = model_response.content
+
         self.memory.append_message(self.conversation_id, "assistant", assistant_reply)
+        self.logger.log_event(
+            "assistant_message",
+            session_id=self.conversation_id,
+            content=assistant_reply,
+        )
         return assistant_reply
 
     def _handle_tool_invocation(self, command: str) -> str:
-        """Parse and execute a tool invocation string.
-
-        The command must begin with ``!``.  This method does not consult
-        memory or the LLM; it delegates directly to the tool broker and
-        returns the result as a string.
-
-        Args:
-            command: raw command string beginning with ``!``
-
-        Returns:
-            The result of the tool call formatted for display.
-        """
-        # Use shlex for robust parsing (handles quoted paths and content)
-        try:
-            tokens = shlex.split(command)
-        except ValueError as exc:
-            return f"Error parsing command: {exc}"
+        tokens = shlex.split(command)
         if not tokens:
             return ""
         verb = tokens[0][1:]
+
         if verb == "fs":
-            # Filesystem operations
             if len(tokens) < 2:
                 return "Usage: !fs [list/read/write] ..."
             op = tokens[1]
             if op == "list":
-                # Optional path argument
                 rel_path = tokens[2] if len(tokens) > 2 else "."
-                result = self.broker.call("filesystem", "list_dir", rel_path)
-                return "\n".join(result) or "(empty)"
+                result = self.broker.request_tool_call(
+                    self.conversation_id,
+                    "filesystem",
+                    "list_dir",
+                    rel_path,
+                )
+                return self._format_direct_result(result)
             if op == "read":
                 if len(tokens) < 3:
                     return "Usage: !fs read <path>"
-                rel_path = tokens[2]
-                return self.broker.call("filesystem", "read_file", rel_path)
+                result = self.broker.request_tool_call(
+                    self.conversation_id,
+                    "filesystem",
+                    "read_file",
+                    tokens[2],
+                )
+                return self._format_direct_result(result)
             if op == "write":
                 if len(tokens) < 3:
                     return "Usage: !fs write <path> [content]"
                 rel_path = tokens[2]
-                # If there is content provided on the same line, join the remaining tokens
                 if len(tokens) > 3:
                     content = " ".join(tokens[3:])
                 else:
-                    # Otherwise, prompt the user for multiline input until 'EOF' is entered
-                    print(
-                        "Enter file content, then type a single line containing 'EOF' to finish:"
-                    )
+                    print("Enter file content, then type a single line containing 'EOF' to finish:")
                     lines: List[str] = []
                     while True:
                         try:
@@ -161,76 +157,118 @@ class ChatRuntime:
                             break
                         lines.append(line)
                     content = "\n".join(lines)
-                self.broker.call("filesystem", "write_file", rel_path, content)
-                return "OK"
+                result = self.broker.request_tool_call(
+                    self.conversation_id,
+                    "filesystem",
+                    "write_file",
+                    rel_path,
+                    content,
+                )
+                return self._format_direct_result(result)
             return f"Unknown filesystem operation: {op}"
-        elif verb == "shell":
-            # A shell command may contain spaces; reconstruct it from the original string
-            # The token list includes '!shell' as tokens[0]
+
+        if verb == "shell":
             if len(tokens) < 2:
                 return "Usage: !shell <command>"
-            # Extract the command portion after the '!shell ' prefix
-            # Find the position of the first space after '!shell'
-            prefix = "!shell"
-            if command.startswith(prefix):
-                shell_cmd = command[len(prefix):].lstrip()
-            else:
-                # Fallback: join tokens excluding the first
-                shell_cmd = " ".join(tokens[1:])
-            return self.broker.call("shell", "run", shell_cmd)
-        else:
-            return f"Unknown tool prefix: {verb}"
+            shell_cmd = command[len("!shell") :].lstrip()
+            result = self.broker.request_tool_call(
+                self.conversation_id,
+                "shell",
+                "run",
+                shell_cmd,
+            )
+            return self._format_direct_result(result)
+
+        return f"Unknown tool prefix: {verb}"
+
+    def _format_tool_result(self, model_response: ModelResponse, result: ToolCallResult) -> str:
+        lead = model_response.content.strip()
+        body = self._format_direct_result(result)
+        if lead and lead != body:
+            return f"{lead}\n{body}"
+        return body
+
+    def _format_direct_result(self, result: ToolCallResult) -> str:
+        if result.status == "executed":
+            if isinstance(result.output, list):
+                return "\n".join(result.output) or "(empty)"
+            if result.output in (None, ""):
+                return "OK"
+            return str(result.output)
+        if result.status == "approval_required":
+            return (
+                f"Approval required: {result.message}\n"
+                f"Request ID: {result.request_id}\n"
+                f"Use !approve {result.request_id} or !deny {result.request_id}."
+            )
+        return result.message
+
+    def _approve_command(self, command: str) -> str:
+        parts = shlex.split(command)
+        request_id = parts[1] if len(parts) > 1 else None
+        if request_id is None and len(self.broker.list_pending(self.conversation_id)) > 1:
+            return "Multiple pending requests exist. Use !pending and approve one by request ID."
+        result = self.broker.approve(self.conversation_id, request_id)
+        return self._format_direct_result(result)
+
+    def _deny_command(self, command: str) -> str:
+        parts = shlex.split(command)
+        request_id = parts[1] if len(parts) > 1 else None
+        if request_id is None and len(self.broker.list_pending(self.conversation_id)) > 1:
+            return "Multiple pending requests exist. Use !pending and deny one by request ID."
+        result = self.broker.deny(self.conversation_id, request_id)
+        return self._format_direct_result(result)
 
     def _help_message(self) -> str:
-        """Return a static help string describing built‑in commands."""
-        lines = [
-            "Available commands:",
-            "  !help                Show this help message.",
-            "  !history             Show the conversation history.",
-            "  !fs list [path]      List directory contents in the workspace.",
-            "  !fs read <path>      Read a file from the workspace.",
-            "  !fs write <path> [content]  Write content to a file in the workspace.  If",
-            "                           no content is provided on the same line you will",
-            "                           be prompted to enter multiline text ending with 'EOF'.",
-            "  !shell <command>     Run a whitelisted shell command.",
-            "Messages not starting with '!' are sent to the assistant chat system.",
-        ]
-        return "\n".join(lines)
+        return "\n".join(
+            [
+                "Available commands:",
+                "  !help                 Show this help message.",
+                "  !history              Show conversation history.",
+                "  !status               Show backend, workspace, and approval info.",
+                "  !pending              List pending approvals.",
+                "  !approve [request_id] Approve a pending action.",
+                "  !deny [request_id]    Deny a pending action.",
+                "  !fs list [path]       List workspace directory contents.",
+                "  !fs read <path>       Read a file from the workspace.",
+                "  !fs write <path> [content]  Write a file in the workspace.",
+                "  !shell <command>      Run an allowlisted shell command.",
+                "Messages not starting with '!' go through the governed model runtime.",
+            ]
+        )
 
     def _history_message(self) -> str:
-        """Return a formatted conversation history for the current session."""
         history = self.memory.load_history(self.conversation_id)
         if not history:
             return "(no history)"
-        # Format the history lines
         formatted = []
         for role, content in history:
             prefix = "YOU" if role == "user" else "ASSISTANT"
             formatted.append(f"[{prefix}] {content}")
         return "\n".join(formatted)
 
-    def _generate_reply(self, user_message: str) -> str:
-        """Create a reply for the user.
+    def _status_message(self) -> str:
+        pending_count = len(self.broker.list_pending(self.conversation_id))
+        return "\n".join(
+            [
+                f"Session: {self.conversation_id}",
+                f"Model backend: {self.model.backend_name}",
+                f"Workspace: {self.config.workspace_root}",
+                f"Pending approvals: {pending_count}",
+                f"Audit log: {self.config.audit_log_path}",
+            ]
+        )
 
-        This is a stub implementation.  Future versions should include a
-        call to a local language model or retrieval augmented generation
-        pipeline.  The function can inspect previous conversation history
-        via ``self.memory.load_history()``.
-
-        Args:
-            user_message: the message provided by the user
-
-        Returns:
-            A simple echo reply.
-        """
-        # For demonstration, just echo the input with a prefix
-        return f"You said: {user_message} (NOTE: language model not yet integrated)"
+    def _pending_message(self) -> str:
+        pending = self.broker.list_pending(self.conversation_id)
+        if not pending:
+            return "(no pending approvals)"
+        lines = ["Pending approvals:"]
+        for item in pending:
+            lines.append(
+                f"  {item.request_id} -> {item.tool_name}.{item.method_name} args={item.args!r} reason={item.reason}"
+            )
+        return "\n".join(lines)
 
     def shutdown(self) -> None:
-        """Clean up resources before exiting.
-
-        Currently this method is a placeholder.  It could flush buffered
-        state, close database connections or perform other teardown tasks.
-        """
-        # In the future, any necessary teardown can be implemented here
-        pass
+        self.logger.log_event("session_shutdown", session_id=self.conversation_id)
