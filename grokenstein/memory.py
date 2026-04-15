@@ -1,44 +1,52 @@
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+from pathlib import Path
 import json
-import os
-from typing import Dict, List, Tuple
 
 
-class MemoryManager:
-    """Simple JSON-backed session transcript store."""
+@dataclass
+class DurableFact:
+    workspace: str
+    key: str
+    value: str
+    source: str
+    created_at: str
 
-    def __init__(self, filepath: str) -> None:
-        self.filepath = filepath
-        self._data: Dict[str, List[Dict[str, str]]] = {}
-        self._load()
 
-    def _load(self) -> None:
-        if not os.path.exists(self.filepath):
-            os.makedirs(os.path.dirname(self.filepath), exist_ok=True)
-            with open(self.filepath, "w", encoding="utf-8") as fh:
-                json.dump({}, fh, indent=2)
-            self._data = {}
-            return
+class MemoryStore:
+    def __init__(self, data_dir: Path) -> None:
+        self.path = data_dir / "facts.json"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if not self.path.exists():
+            self.path.write_text("[]", encoding="utf-8")
 
-        try:
-            with open(self.filepath, "r", encoding="utf-8") as fh:
-                self._data = json.load(fh) or {}
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Memory file {self.filepath} is not valid JSON: {exc}") from exc
+    def _load_all(self) -> list[dict]:
+        return json.loads(self.path.read_text(encoding="utf-8"))
 
-    def _save(self) -> None:
-        temp_path = f"{self.filepath}.tmp"
-        with open(temp_path, "w", encoding="utf-8") as fh:
-            json.dump(self._data, fh, indent=2)
-        os.replace(temp_path, self.filepath)
+    def _save_all(self, items: list[dict]) -> None:
+        self.path.write_text(json.dumps(items, indent=2), encoding="utf-8")
 
-    def load_history(self, conversation_id: str) -> List[Tuple[str, str]]:
-        messages = self._data.get(conversation_id, [])
-        return [(msg.get("role", "unknown"), msg.get("content", "")) for msg in messages]
+    def promote(self, workspace: str, key: str, value: str, source: str) -> DurableFact:
+        fact = DurableFact(
+            workspace=workspace,
+            key=key,
+            value=value,
+            source=source,
+            created_at=datetime.now(timezone.utc).isoformat(),
+        )
+        items = self._load_all()
+        items = [i for i in items if not (i["workspace"] == workspace and i["key"] == key)]
+        items.append(asdict(fact))
+        self._save_all(items)
+        return fact
 
-    def append_message(self, conversation_id: str, role: str, content: str) -> None:
-        if conversation_id not in self._data:
-            self._data[conversation_id] = []
-        self._data[conversation_id].append({"role": role, "content": content})
-        self._save()
+    def list_for_workspace(self, workspace: str) -> list[DurableFact]:
+        return [DurableFact(**item) for item in self._load_all() if item["workspace"] == workspace]
+
+    def get(self, workspace: str, key: str) -> DurableFact | None:
+        for item in self._load_all():
+            if item["workspace"] == workspace and item["key"] == key:
+                return DurableFact(**item)
+        return None

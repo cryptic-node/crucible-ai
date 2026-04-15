@@ -1,3 +1,1 @@
-# Grokenstein runtime uses only the Python standard library in v0.0.4.
-# Install tests separately with:
-#   pip install -r requirements-dev.txt
+# stdlib-only foundation kit

@@ -1,274 +1,301 @@
 from __future__ import annotations
 
 import shlex
-from pathlib import Path
-from typing import List
 
-from .approvals import PendingApprovalStore
-from .config import RuntimeConfig
-from .logger import AuditLogger
-from .memory import MemoryManager
-from .model import ModelResponse, create_model_adapter
-from .policy import PolicyEngine
-from .tool_broker import ToolBroker, ToolCallResult
+from .approval_queue import ApprovalQueue
+from .audit import AuditLogger
+from .broker import ToolBroker
+from .config import Settings
+from .memory import MemoryStore
+from .model import select_adapter
+from .session import SessionStore
+from .tasks import TaskManager, TaskStorage
+from .workspace.inspector import WorkspaceInspector
+from .workspace.summary import summarize_workspace
+from .workspace.search import search_workspace
 
 
-class ChatRuntime:
-    def __init__(
-        self,
-        conversation_id: str = "default",
-        workspace_root: str | None = None,
-        base_dir: str | Path | None = None,
-        model_backend: str | None = None,
-        model_name: str | None = None,
-    ) -> None:
-        self.conversation_id = conversation_id
-        self.config = RuntimeConfig.from_env(
-            workspace_root=workspace_root,
-            base_dir=base_dir,
-            model_backend=model_backend,
-            model_name=model_name,
-        )
-        self.memory = MemoryManager(str(self.config.memory_path))
-        self.logger = AuditLogger(str(self.config.audit_log_path))
-        self.approvals = PendingApprovalStore(str(self.config.approval_store_path))
-        self.policy = PolicyEngine(
-            shell_allowlist=self.config.shell_allowlist,
-            kill_switch=self.config.kill_switch,
-            require_approval_for_write=self.config.require_approval_for_write,
-            require_approval_for_shell=self.config.require_approval_for_shell,
-        )
+SYSTEM_PROMPT = (
+    "You are Grokenstein, a local-first, security-minded apprentice runtime. "
+    "Respect the workspace boundary, separate planning from execution, and be honest about uncertainty."
+)
+
+
+class GrokensteinRuntime:
+    def __init__(self, settings: Settings, session_id: str) -> None:
+        self.settings = settings
+        self.session_id = session_id
+        self.settings.workspace_root.mkdir(parents=True, exist_ok=True)
+        self.settings.data_dir.mkdir(parents=True, exist_ok=True)
+        self.audit = AuditLogger(self.settings.audit_log_file or (self.settings.data_dir / "audit.jsonl"))
+        self.approvals = ApprovalQueue(self.settings.data_dir)
         self.broker = ToolBroker(
-            policy=self.policy,
-            logger=self.logger,
+            session_id=session_id,
+            workspace_root=self.settings.workspace_root,
             approvals=self.approvals,
-            workspace_root=self.config.workspace_root,
+            audit=self.audit,
+            shell_timeout=self.settings.shell_timeout,
         )
-        self.model = create_model_adapter(self.config)
-        self.logger.log_event(
-            "session_started",
-            session_id=self.conversation_id,
-            model_backend=self.model.backend_name,
-            workspace_root=str(self.config.workspace_root),
+        self.sessions = SessionStore(self.settings.data_dir)
+        self.state = self.sessions.load(session_id)
+        self.memory = MemoryStore(self.settings.data_dir)
+        self.tasks = TaskManager(
+            TaskStorage(self.settings.data_dir),
+            workspace_name=str(self.settings.workspace_root),
+            workspace_root=self.settings.workspace_root,
         )
+        self.adapter = select_adapter(self.settings)
 
-    def handle_user_message(self, user_message: str) -> str:
-        stripped = user_message.strip()
-        if not stripped:
+    def save(self) -> None:
+        self.sessions.save(self.state)
+
+    def active_task(self):
+        if not self.state.active_task_id:
+            return None
+        return self.tasks.get(self.state.active_task_id)
+
+    def handle_line(self, line: str) -> str:
+        line = line.strip()
+        if not line:
             return ""
-
-        if stripped.lower() in {"!help", "help"}:
-            return self._help_message()
-        if stripped.lower() in {"!history", "history"}:
-            return self._history_message()
-        if stripped.lower() in {"!status", "status"}:
-            return self._status_message()
-        if stripped.lower() in {"!pending", "pending"}:
-            return self._pending_message()
-        if stripped.startswith("!approve"):
-            return self._approve_command(stripped)
-        if stripped.startswith("!deny"):
-            return self._deny_command(stripped)
-
-        if stripped.startswith("!"):
-            try:
-                return self._handle_tool_invocation(stripped)
-            except Exception as exc:  # pragma: no cover - CLI safety net
-                self.logger.log_event(
-                    "tool_error",
-                    session_id=self.conversation_id,
-                    error=repr(exc),
-                )
-                return f"Error: {exc}"
-
-        self.logger.log_event(
-            "user_message",
-            session_id=self.conversation_id,
-            content=user_message,
-        )
-        self.memory.append_message(self.conversation_id, "user", user_message)
-        history = self.memory.load_history(self.conversation_id)
-        model_response = self.model.generate(user_message, history)
-
-        if model_response.mode == "tool_call":
-            broker_result = self.broker.request_tool_call(
-                self.conversation_id,
-                model_response.tool_name or "",
-                model_response.method_name or "",
-                *model_response.args,
-                **model_response.kwargs,
-            )
-            assistant_reply = self._format_tool_result(model_response, broker_result)
+        if line.startswith("!"):
+            output = self._handle_command(line)
         else:
-            assistant_reply = model_response.content
+            output = self._handle_chat(line)
+        self.save()
+        return output
 
-        self.memory.append_message(self.conversation_id, "assistant", assistant_reply)
-        self.logger.log_event(
-            "assistant_message",
-            session_id=self.conversation_id,
-            content=assistant_reply,
-        )
-        return assistant_reply
+    def _handle_chat(self, line: str) -> str:
+        self.state.history.append({"role": "user", "content": line})
+        task = self.active_task()
+        task_context = self.tasks.render(task) if task else "No active task."
+        facts = self.memory.list_for_workspace(str(self.settings.workspace_root))
+        fact_lines = "\n".join(
+            f"- {fact.key}: {fact.value}" for fact in facts[:10]
+        ) or "(no durable facts)"
+        messages = [
+            *self.state.history[-8:],
+            {"role": "system", "content": f"Mode: {self.state.mode}\nTask:\n{task_context}\nFacts:\n{fact_lines}"},
+        ]
+        reply = self.adapter.complete(SYSTEM_PROMPT, messages)
+        self.state.history.append({"role": "assistant", "content": reply})
+        self.audit.log("chat.reply", self.session_id, backend=self.adapter.name)
+        return reply
 
-    def _handle_tool_invocation(self, command: str) -> str:
-        tokens = shlex.split(command)
-        if not tokens:
-            return ""
-        verb = tokens[0][1:]
+    def _handle_command(self, line: str) -> str:
+        parts = shlex.split(line)
+        cmd = parts[0]
+        args = parts[1:]
 
-        if verb == "fs":
-            if len(tokens) < 2:
-                return "Usage: !fs [list/read/write] ..."
-            op = tokens[1]
-            if op == "list":
-                rel_path = tokens[2] if len(tokens) > 2 else "."
-                result = self.broker.request_tool_call(
-                    self.conversation_id,
-                    "filesystem",
-                    "list_dir",
-                    rel_path,
-                )
-                return self._format_direct_result(result)
-            if op == "read":
-                if len(tokens) < 3:
-                    return "Usage: !fs read <path>"
-                result = self.broker.request_tool_call(
-                    self.conversation_id,
-                    "filesystem",
-                    "read_file",
-                    tokens[2],
-                )
-                return self._format_direct_result(result)
-            if op == "write":
-                if len(tokens) < 3:
-                    return "Usage: !fs write <path> [content]"
-                rel_path = tokens[2]
-                if len(tokens) > 3:
-                    content = " ".join(tokens[3:])
-                else:
-                    print("Enter file content, then type a single line containing 'EOF' to finish:")
-                    lines: List[str] = []
-                    while True:
-                        try:
-                            line = input()
-                        except EOFError:
-                            break
-                        if line.strip() == "EOF":
-                            break
-                        lines.append(line)
-                    content = "\n".join(lines)
-                result = self.broker.request_tool_call(
-                    self.conversation_id,
-                    "filesystem",
-                    "write_file",
-                    rel_path,
-                    content,
-                )
-                return self._format_direct_result(result)
-            return f"Unknown filesystem operation: {op}"
-
-        if verb == "shell":
-            if len(tokens) < 2:
+        if cmd == "!help":
+            return self._help_text()
+        if cmd == "!history":
+            return "\n".join(
+                f"[{row['role'].upper()}] {row['content']}" for row in self.state.history[-20:]
+            ) or "(empty)"
+        if cmd == "!pending":
+            return self.broker.pending()
+        if cmd == "!approve":
+            req_id = args[0] if args else None
+            res = self.broker.approve(req_id)
+            return res.output if res.success else f"ERROR: {res.error}"
+        if cmd == "!deny":
+            req_id = args[0] if args else None
+            res = self.broker.deny(req_id)
+            return res.output if res.success else f"ERROR: {res.error}"
+        if cmd == "!mode":
+            if not args or args[0] not in {"plan", "execute"}:
+                return f"Current mode: {self.state.mode}"
+            self.state.mode = args[0]
+            return f"Mode set to {self.state.mode}"
+        if cmd == "!fs":
+            return self._cmd_fs(args)
+        if cmd == "!shell":
+            if not args:
                 return "Usage: !shell <command>"
-            shell_cmd = command[len("!shell") :].lstrip()
-            result = self.broker.request_tool_call(
-                self.conversation_id,
-                "shell",
-                "run",
-                shell_cmd,
-            )
-            return self._format_direct_result(result)
+            res = self.broker.call("shell", {"command": " ".join(args)})
+            if res.requires_approval:
+                return f"Approval required: {res.error}\nApproval ID: {res.approval_id}"
+            return res.output if res.success else f"ERROR: {res.error}"
+        if cmd == "!project":
+            return self._cmd_project(args)
+        if cmd == "!memory":
+            return self._cmd_memory(args)
+        if cmd == "!task":
+            return self._cmd_task(args)
+        return f"Unknown command: {cmd}"
 
-        return f"Unknown tool prefix: {verb}"
+    def _cmd_fs(self, args: list[str]) -> str:
+        if not args:
+            return "Usage: !fs <list|read|write> ..."
+        sub = args[0]
+        if sub == "list":
+            path = args[1] if len(args) > 1 else "."
+            res = self.broker.call("fs.list", {"path": path})
+            return res.output if res.success else f"ERROR: {res.error}"
+        if sub == "read" and len(args) >= 2:
+            res = self.broker.call("fs.read", {"path": args[1]})
+            return res.output if res.success else f"ERROR: {res.error}"
+        if sub == "write" and len(args) >= 3:
+            path = args[1]
+            content = " ".join(args[2:])
+            res = self.broker.call("fs.write", {"path": path, "content": content})
+            if res.requires_approval:
+                return f"Approval required: {res.error}\nApproval ID: {res.approval_id}"
+            return res.output if res.success else f"ERROR: {res.error}"
+        return "Usage: !fs list [path] | !fs read <path> | !fs write <path> <content>"
 
-    def _format_tool_result(self, model_response: ModelResponse, result: ToolCallResult) -> str:
-        lead = model_response.content.strip()
-        body = self._format_direct_result(result)
-        if lead and lead != body:
-            return f"{lead}\n{body}"
-        return body
-
-    def _format_direct_result(self, result: ToolCallResult) -> str:
-        if result.status == "executed":
-            if isinstance(result.output, list):
-                return "\n".join(result.output) or "(empty)"
-            if result.output in (None, ""):
-                return "OK"
-            return str(result.output)
-        if result.status == "approval_required":
-            return (
-                f"Approval required: {result.message}\n"
-                f"Request ID: {result.request_id}\n"
-                f"Use !approve {result.request_id} or !deny {result.request_id}."
-            )
-        return result.message
-
-    def _approve_command(self, command: str) -> str:
-        parts = shlex.split(command)
-        request_id = parts[1] if len(parts) > 1 else None
-        if request_id is None and len(self.broker.list_pending(self.conversation_id)) > 1:
-            return "Multiple pending requests exist. Use !pending and approve one by request ID."
-        result = self.broker.approve(self.conversation_id, request_id)
-        return self._format_direct_result(result)
-
-    def _deny_command(self, command: str) -> str:
-        parts = shlex.split(command)
-        request_id = parts[1] if len(parts) > 1 else None
-        if request_id is None and len(self.broker.list_pending(self.conversation_id)) > 1:
-            return "Multiple pending requests exist. Use !pending and deny one by request ID."
-        result = self.broker.deny(self.conversation_id, request_id)
-        return self._format_direct_result(result)
-
-    def _help_message(self) -> str:
-        return "\n".join(
-            [
-                "Available commands:",
-                "  !help                 Show this help message.",
-                "  !history              Show conversation history.",
-                "  !status               Show backend, workspace, and approval info.",
-                "  !pending              List pending approvals.",
-                "  !approve [request_id] Approve a pending action.",
-                "  !deny [request_id]    Deny a pending action.",
-                "  !fs list [path]       List workspace directory contents.",
-                "  !fs read <path>       Read a file from the workspace.",
-                "  !fs write <path> [content]  Write a file in the workspace.",
-                "  !shell <command>      Run an allowlisted shell command.",
-                "Messages not starting with '!' go through the governed model runtime.",
+    def _cmd_project(self, args: list[str]) -> str:
+        if not args:
+            return "Usage: !project <inspect|summary|search>"
+        sub = args[0]
+        if sub == "inspect":
+            report = WorkspaceInspector(self.settings.workspace_root).inspect()
+            lines = [
+                f"Workspace: {report.root}",
+                f"Files: {report.file_count}",
+                "Entrypoints:",
+                *[f"- {item}" for item in report.entrypoints or ["(none)"]],
+                "Tree:",
+                *report.tree_preview[:24],
             ]
+            return "\n".join(lines)
+        if sub == "summary":
+            summary = summarize_workspace(self.settings.workspace_root)
+            task = self.active_task()
+            if task:
+                report = WorkspaceInspector(self.settings.workspace_root).inspect()
+                self.tasks.attach_summary(
+                    task.id,
+                    summary,
+                    report.entrypoints[:8] + report.interesting_files[:8],
+                )
+            return summary
+        if sub == "search" and len(args) >= 2:
+            query = " ".join(args[1:])
+            hits = search_workspace(self.settings.workspace_root, query)
+            if not hits:
+                return "(no hits)"
+            return "\n".join(
+                f"{hit.path}:{hit.line_no}: {hit.line}" if hit.line_no else f"{hit.path}: {hit.line}"
+                for hit in hits
+            )
+        return "Usage: !project inspect | !project summary | !project search <query>"
+
+    def _cmd_memory(self, args: list[str]) -> str:
+        workspace = str(self.settings.workspace_root)
+        if not args:
+            return "Usage: !memory <list|get|promote>"
+        sub = args[0]
+        if sub == "list":
+            facts = self.memory.list_for_workspace(workspace)
+            if not facts:
+                return "(no durable facts)"
+            return "\n".join(f"- {fact.key}: {fact.value} ({fact.source})" for fact in facts)
+        if sub == "get" and len(args) >= 2:
+            fact = self.memory.get(workspace, args[1])
+            if not fact:
+                return "(not found)"
+            return f"{fact.key}: {fact.value}\nsource: {fact.source}\ncreated: {fact.created_at}"
+        if sub == "promote" and len(args) >= 3:
+            key = args[1]
+            value = " ".join(args[2:])
+            fact = self.memory.promote(workspace, key, value, source=f"session:{self.session_id}")
+            self.audit.log("memory.promoted", self.session_id, key=key)
+            return f"Promoted fact: {fact.key} = {fact.value}"
+        return "Usage: !memory list | !memory get <key> | !memory promote <key> <value>"
+
+    def _cmd_task(self, args: list[str]) -> str:
+        if not args:
+            return "Usage: !task <new|list|use|show|mode|plan|done|checkpoint|block|unblock>"
+        sub = args[0]
+        if sub == "new" and len(args) >= 2:
+            title = " ".join(args[1:])
+            task = self.tasks.create(title=title)
+            self.state.active_task_id = task.id
+            self.state.mode = task.mode
+            self.audit.log("task.created", self.session_id, task_id=task.id, title=task.title)
+            return f"Created task {task.id}\n{self.tasks.render(task)}"
+        if sub == "list":
+            tasks = self.tasks.list()
+            if not tasks:
+                return "(no tasks)"
+            lines = []
+            for task in tasks:
+                marker = "*" if task.id == self.state.active_task_id else " "
+                lines.append(f"{marker} {task.id} | {task.status} | {task.mode} | {task.title}")
+            return "\n".join(lines)
+        if sub == "use" and len(args) >= 2:
+            task = self.tasks.get(args[1])
+            if not task:
+                return f"Task not found: {args[1]}"
+            self.state.active_task_id = task.id
+            self.state.mode = task.mode
+            return f"Active task set to {task.id}\n{self.tasks.render(task)}"
+        task = self.active_task()
+        if task is None:
+            return "No active task. Use !task new <title> or !task use <id>."
+        if sub == "show":
+            return self.tasks.render(task)
+        if sub == "mode":
+            if len(args) < 2 or args[1] not in {"plan", "execute"}:
+                return f"Current task mode: {task.mode}"
+            task = self.tasks.set_mode(task.id, args[1])
+            self.state.mode = task.mode
+            return self.tasks.render(task)
+        if sub == "plan":
+            task = self.tasks.plan(task.id)
+            self.state.mode = task.mode
+            self.audit.log("task.planned", self.session_id, task_id=task.id)
+            return self.tasks.render(task)
+        if sub == "done":
+            index = int(args[1]) - 1 if len(args) >= 2 else None
+            task = self.tasks.mark_done(task.id, index=index)
+            self.audit.log("task.step_done", self.session_id, task_id=task.id)
+            return self.tasks.render(task)
+        if sub == "checkpoint" and len(args) >= 2:
+            note = " ".join(args[1:])
+            task = self.tasks.checkpoint(task.id, note)
+            self.audit.log("task.checkpoint", self.session_id, task_id=task.id)
+            return self.tasks.render(task)
+        if sub == "block" and len(args) >= 2:
+            task = self.tasks.block(task.id, " ".join(args[1:]))
+            return self.tasks.render(task)
+        if sub == "unblock":
+            task = self.tasks.unblock(task.id)
+            return self.tasks.render(task)
+        return (
+            "Usage: !task show | !task mode <plan|execute> | !task plan | !task done [n] | "
+            "!task checkpoint <note> | !task block <reason> | !task unblock"
         )
 
-    def _history_message(self) -> str:
-        history = self.memory.load_history(self.conversation_id)
-        if not history:
-            return "(no history)"
-        formatted = []
-        for role, content in history:
-            prefix = "YOU" if role == "user" else "ASSISTANT"
-            formatted.append(f"[{prefix}] {content}")
-        return "\n".join(formatted)
-
-    def _status_message(self) -> str:
-        pending_count = len(self.broker.list_pending(self.conversation_id))
-        return "\n".join(
-            [
-                f"Session: {self.conversation_id}",
-                f"Model backend: {self.model.backend_name}",
-                f"Workspace: {self.config.workspace_root}",
-                f"Pending approvals: {pending_count}",
-                f"Audit log: {self.config.audit_log_path}",
-            ]
+    def _help_text(self) -> str:
+        return (
+            "Grokenstein v0.0.5 commands\n"
+            "!help\n"
+            "!history\n"
+            "!mode [plan|execute]\n"
+            "!pending\n"
+            "!approve [approval_id]\n"
+            "!deny [approval_id]\n"
+            "!task new <title>\n"
+            "!task list\n"
+            "!task use <id>\n"
+            "!task show\n"
+            "!task mode <plan|execute>\n"
+            "!task plan\n"
+            "!task done [n]\n"
+            "!task checkpoint <note>\n"
+            "!task block <reason>\n"
+            "!task unblock\n"
+            "!project inspect\n"
+            "!project summary\n"
+            "!project search <query>\n"
+            "!fs list [path]\n"
+            "!fs read <path>\n"
+            "!fs write <path> <content>\n"
+            "!shell <command>\n"
+            "!memory list\n"
+            "!memory get <key>\n"
+            "!memory promote <key> <value>"
         )
-
-    def _pending_message(self) -> str:
-        pending = self.broker.list_pending(self.conversation_id)
-        if not pending:
-            return "(no pending approvals)"
-        lines = ["Pending approvals:"]
-        for item in pending:
-            lines.append(
-                f"  {item.request_id} -> {item.tool_name}.{item.method_name} args={item.args!r} reason={item.reason}"
-            )
-        return "\n".join(lines)
-
-    def shutdown(self) -> None:
-        self.logger.log_event("session_shutdown", session_id=self.conversation_id)

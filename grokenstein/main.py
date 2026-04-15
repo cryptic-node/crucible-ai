@@ -1,58 +1,41 @@
-"""CLI entry point for Grokenstein."""
-
 from __future__ import annotations
 
 import argparse
 
-from . import __version__
-from .runtime import ChatRuntime
+from .config import Settings
+from .runtime import GrokensteinRuntime
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run a Grokenstein chat session")
-    parser.add_argument("--id", dest="conversation_id", default="default", help="Unique session identifier")
-    parser.add_argument("--workspace", dest="workspace", default=None, help="Workspace directory for file operations")
-    parser.add_argument(
-        "--model-backend",
-        dest="model_backend",
-        default=None,
-        choices=("rule", "ollama"),
-        help="Override the configured model backend",
-    )
-    parser.add_argument(
-        "--model-name",
-        dest="model_name",
-        default=None,
-        help="Override the configured model name",
-    )
-    args = parser.parse_args()
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Grokenstein v0.0.5")
+    parser.add_argument("--id", default="default-session", help="Session id")
+    parser.add_argument("--workspace", default="./workspace", help="Workspace directory")
+    parser.add_argument("--data-dir", default="./data", help="Data directory")
+    return parser
 
-    runtime = ChatRuntime(
-        conversation_id=args.conversation_id,
-        workspace_root=args.workspace,
-        model_backend=args.model_backend,
-        model_name=args.model_name,
-    )
 
-    print(f"Grokenstein v{__version__} – governed model runtime\n")
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    settings = Settings.from_args(args.workspace, args.data_dir)
+    runtime = GrokensteinRuntime(settings=settings, session_id=args.id)
+
+    print("Grokenstein v0.0.5 – dependable apprentice")
     print("Type 'exit' or press Ctrl-D to quit. Type '!help' for commands.\n")
 
     while True:
         try:
-            user_input = input(">> ").strip()
-        except EOFError:
-            print("\nExiting...")
+            line = input(">> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
             break
-        if not user_input:
-            continue
-        if user_input.lower() in {"exit", "quit"}:
+        if line.strip().lower() in {"exit", "quit"}:
             break
-        response = runtime.handle_user_message(user_input)
-        if response:
-            print(response)
-
-    runtime.shutdown()
+        output = runtime.handle_line(line)
+        if output:
+            print(output)
+    runtime.save()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

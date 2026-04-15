@@ -1,4 +1,2 @@
-"""Top-level package for Grokenstein."""
-
-__all__ = ["__version__"]
-__version__ = "0.0.4"
+__all__ = ["main"]
+__version__ = "0.0.5"

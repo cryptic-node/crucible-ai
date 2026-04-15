@@ -1,27 +1,21 @@
 from __future__ import annotations
 
-from grokenstein.approvals import PendingApprovalStore
-from grokenstein.logger import AuditLogger
-from grokenstein.policy import PolicyEngine
-from grokenstein.tool_broker import ToolBroker
+from pathlib import Path
+
+from grokenstein.approval_queue import ApprovalQueue
+from grokenstein.audit import AuditLogger
+from grokenstein.broker import ToolBroker
 
 
-def test_broker_write_approval_round_trip(tmp_path):
-    workspace = tmp_path / "workspace"
-    logger = AuditLogger(str(tmp_path / "activity.jsonl"))
-    approvals = PendingApprovalStore(str(tmp_path / "approvals.json"))
-    policy = PolicyEngine(
-        shell_allowlist=("ls", "echo", "pwd", "whoami", "date"),
-        kill_switch=False,
-        require_approval_for_write=True,
-        require_approval_for_shell=True,
-    )
-    broker = ToolBroker(policy=policy, logger=logger, approvals=approvals, workspace_root=workspace)
+def test_write_requires_approval_then_executes(tmp_path: Path):
+    approvals = ApprovalQueue(tmp_path)
+    audit = AuditLogger(tmp_path / "audit.jsonl")
+    broker = ToolBroker("s1", tmp_path / "workspace", approvals, audit)
 
-    result = broker.request_tool_call("session1", "filesystem", "write_file", "note.txt", "hello")
-    assert result.status == "approval_required"
-    assert result.request_id is not None
+    first = broker.call("fs.write", {"path": "note.txt", "content": "hello"})
+    assert first.requires_approval
+    assert first.approval_id
 
-    approved = broker.approve("session1", result.request_id)
-    assert approved.status == "executed"
-    assert (workspace / "note.txt").read_text(encoding="utf-8") == "hello"
+    second = broker.approve(first.approval_id)
+    assert second.success
+    assert (tmp_path / "workspace" / "note.txt").read_text(encoding="utf-8") == "hello"
