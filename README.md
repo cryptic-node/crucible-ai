@@ -1,6 +1,6 @@
-# Grokenstein v0.0.4
+# Crucible AI v0.0.4
 
-Grokenstein v0.0.4 is a **governed model runtime** built on the v0.0.3 CLI scaffold.
+Crucible AI v0.0.4 is a **governed model runtime** multiple agent system built on the v0.0.3 CLI scaffold.
 It keeps the local-first command-line workflow, but replaces the placeholder echo loop with:
 
 - a model adapter layer
@@ -34,7 +34,7 @@ No external dependency. This is a deterministic fallback that can:
   - `run pwd`
 
 ### 2. Ollama mode (optional)
-If you already have Ollama running locally, Grokenstein can talk to it using the local HTTP API.
+If you already have Ollama running locally, Crucible AI can talk to it using the local HTTP API.
 
 Set environment variables before launching:
 
@@ -44,7 +44,7 @@ export GROKENSTEIN_MODEL_NAME=llama3.2:3b
 export GROKENSTEIN_OLLAMA_BASE_URL=http://127.0.0.1:11434
 ```
 
-Then run Grokenstein normally.
+Then run Crucible AI normally.
 
 ## Install
 
@@ -105,7 +105,7 @@ python -m grokenstein.main \
 Inside Grokenstein:
 
 ```text
-hello Grokenstein
+hello cru
 write hello-from-v0.0.4 to note.txt
 !pending
 !approve
